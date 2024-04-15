@@ -30,7 +30,7 @@ import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 
-public class WithStateTtlJob {
+public class CrossJoinJob {
 
   public static void main(String[] args) throws Exception {
     final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -44,54 +44,35 @@ public class WithStateTtlJob {
         .set(TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, -1) // set the default parallelism explicitly
         .setLong("table.exec.state.ttl", 10000000);
 
-    tableEnv.executeSql(
-        "CREATE TABLE people ("
-            + " `name` STRING,"
-            + " `age` INT,"
-            // Use it at inner join
-            + " `country` STRING"
-            // Use it at outer join
-            // + " `ts` AS PROCTIME()"
-            + ") WITH ("
-            + " 'connector' = 'datagen',"
-            + " 'fields.country.length' = '1',"
-            + " 'fields.name.length' = '2',"
-            + " 'rows-per-second' = '1'"
-            + ")");
-
     DataStream<Row> countriesStream = env.fromCollection(
-        List.of(Row.of("a", "a"),
-            Row.of("a", "b"),
-            Row.of("a", "c"),
-            Row.of("a", "d")),
+        List.of(
+            Row.of("a",
+                List.of(Row.of("b"))),
+            Row.of("b", List.of())),
         Types.ROW_NAMED(
-            new String[]{"iso", "capital"},
+            new String[]{"id", "items"},
             Types.STRING,
-            Types.STRING)
+            Types.LIST(
+                Types.ROW_NAMED(
+                    new String[]{"item_id"},
+                    Types.STRING)))
     );
 
-    tableEnv.createTemporaryView("input", countriesStream,
+    tableEnv.createTemporaryView("input",
+        countriesStream,
         Schema.newBuilder()
-            // Without this restriction the join will produce four rows for 'a'
-            .primaryKey("iso")
             .build());
 
     String query = """
-        SELECT /*+ STATE_TTL('people'='1ms', 'input'='90d') */
-          people.name AS name, 
-          people.country AS country, 
-          input.capital AS capital 
-        FROM people
-        LEFT OUTER JOIN input
-        ON people.country = input.iso""";
+        SELECT
+          input.id AS id, 
+          T.item_id AS item_id 
+        FROM input
+        LEFT OUTER JOIN UNNEST(input.items) AS T(item_id) ON TRUE""";
 
     Table outerJoin = tableEnv.sqlQuery(query);
 
-    tableEnv.toChangelogStream(outerJoin).print("outer join");
-
-    // It's bidirectional so both sides trigger updates
-    // but setting people's ttl to a minimun in practice avoids it
-    // and keep state size to a minimum.
+    tableEnv.toChangelogStream(outerJoin).print("cross join");
 
     System.out.println(env.getExecutionPlan());
     env.execute("Flink Java API Skeleton");
